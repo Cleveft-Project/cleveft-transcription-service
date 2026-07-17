@@ -18,6 +18,9 @@ public class TranscriptionRequestDTO {
     @NotBlank(message = "Source URL is required")
     private String sourceUrl;
 
+    @Size(max = 20, message = "Course code must not exceed 20 characters")
+    private String courseCode;
+
     @Size(max = 10, message = "Language code must not exceed 10 characters")
     private String language;
 

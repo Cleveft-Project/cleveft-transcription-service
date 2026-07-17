@@ -2,10 +2,7 @@ package com.cleveft.transcriptionservice.model;
 
 import jakarta.persistence.*;
 import lombok.*;
-import org.hibernate.annotations.Array;
 import org.hibernate.annotations.CreationTimestamp;
-import org.hibernate.annotations.JdbcTypeCode;
-import org.hibernate.type.SqlTypes;
 
 import java.time.LocalDateTime;
 import java.util.UUID;
@@ -44,9 +41,7 @@ public class LectureChunk {
     @Column(name = "end_time")
     private Double endTime;
 
-    @JdbcTypeCode(SqlTypes.VECTOR)
-    @Array(length = 768)
-    @Column(name = "embedding")
+    @Column(name = "embedding", columnDefinition = "vector(768)")
     private float[] embedding;
 
     @CreationTimestamp

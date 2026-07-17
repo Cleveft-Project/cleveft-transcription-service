@@ -27,6 +27,12 @@ public class Lecture {
     @Column(name = "title", nullable = false)
     private String title;
 
+    @Column(name = "course_code")
+    private String courseCode;
+
+    @Column(name = "user_id", nullable = false)
+    private UUID userId;
+
     @Column(name = "source_url")
     private String sourceUrl;
 

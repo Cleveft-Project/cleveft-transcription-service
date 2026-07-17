@@ -41,10 +41,12 @@ public class TranscriptionServiceImpl implements TranscriptionService {
         // 1. Persist the lecture record in PENDING state
         Lecture lecture = Lecture.builder()
                 .title(request.getTitle())
+                .courseCode(request.getCourseCode())
                 .sourceUrl(request.getSourceUrl())
                 .language(request.getLanguage())
                 .durationSeconds(request.getDurationSeconds())
                 .status(LectureStatus.PENDING)
+                .userId(UUID.randomUUID()) // Mock user ID to satisfy NOT NULL constraint
                 .build();
 
         lecture = lectureRepository.save(lecture);
