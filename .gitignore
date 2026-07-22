@@ -27,3 +27,6 @@ replay_pid*
 #Environment variables
 .env
 .vscode/
+
+.idea/
+*.iml
