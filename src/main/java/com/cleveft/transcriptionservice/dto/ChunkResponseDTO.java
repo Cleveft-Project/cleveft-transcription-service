@@ -1,28 +1,27 @@
 package com.cleveft.transcriptionservice.dto;
 
-import lombok.*;
+import com.cleveft.transcriptionservice.model.LectureChunk;
 
-import java.time.LocalDateTime;
 import java.util.UUID;
 
-@Getter
-@Setter
-@NoArgsConstructor
-@AllArgsConstructor
-@Builder
-public class ChunkResponseDTO {
+public record ChunkResponseDTO(
+        UUID id,
+        UUID lectureId,
+        Integer chunkIndex,
+        String content,
+        Double startTime,
+        Double endTime,
+        String topicTag
+) {
 
-    private UUID id;
-
-    private UUID lectureId;
-
-    private Integer chunkIndex;
-
-    private String content;
-
-    private Double startTime;
-
-    private Double endTime;
-
-    private LocalDateTime createdAt;
+    public static ChunkResponseDTO from(LectureChunk chunk) {
+        return new ChunkResponseDTO(
+                chunk.getId(),
+                chunk.getLecture().getId(),
+                chunk.getChunkIndex(),
+                chunk.getContent(),
+                chunk.getStartTime(),
+                chunk.getEndTime(),
+                chunk.getTopicTag());
+    }
 }

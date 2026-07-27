@@ -1,286 +1,473 @@
 package com.cleveft.transcriptionservice.service;
 
+import com.cleveft.transcriptionservice.ai.AudioMimeResolver;
+import com.cleveft.transcriptionservice.ai.EmbeddingProvider;
+import com.cleveft.transcriptionservice.client.AuthPlanClient;
+import com.cleveft.transcriptionservice.dto.ChunkMatchDTO;
 import com.cleveft.transcriptionservice.dto.ChunkResponseDTO;
 import com.cleveft.transcriptionservice.dto.LectureResponseDTO;
-import com.cleveft.transcriptionservice.dto.TranscriptionRequestDTO;
+import com.cleveft.transcriptionservice.dto.LectureStatusDTO;
+import com.cleveft.transcriptionservice.dto.LectureSummaryDTO;
+import com.cleveft.transcriptionservice.dto.SearchRequestDTO;
+import com.cleveft.transcriptionservice.dto.UpdateLectureRequestDTO;
+import com.cleveft.transcriptionservice.dto.UsageDTO;
+import com.cleveft.transcriptionservice.exception.ApiException;
 import com.cleveft.transcriptionservice.model.Lecture;
 import com.cleveft.transcriptionservice.model.Lecture.LectureStatus;
-import com.cleveft.transcriptionservice.model.LectureChunk;
+import com.cleveft.transcriptionservice.repository.ChunkVectorWriter;
 import com.cleveft.transcriptionservice.repository.LectureChunkRepository;
 import com.cleveft.transcriptionservice.repository.LectureRepository;
-import jakarta.persistence.EntityNotFoundException;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.multipart.MultipartFile;
 
-import java.util.*;
-import java.util.stream.Collectors;
+import java.io.IOException;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
+import java.util.List;
+import java.util.UUID;
 
 @Service
-@RequiredArgsConstructor
-@Slf4j
 public class TranscriptionServiceImpl implements TranscriptionService {
 
-    private static final int VECTOR_DIMENSIONS = 768;
-    private static final int DEFAULT_CHUNK_COUNT = 5;
-    private static final double CHUNK_DURATION_SECONDS = 30.0;
+    private static final Logger log = LoggerFactory.getLogger(TranscriptionServiceImpl.class);
 
     private final LectureRepository lectureRepository;
     private final LectureChunkRepository chunkRepository;
+    private final LectureProcessor processor;
+    private final AudioStorage audioStorage;
+    private final AudioMimeResolver mimeResolver;
+    private final EmbeddingProvider embeddingProvider;
+    private final AuthPlanClient planClient;
 
-    // ----------------------------------------------------------------
-    //  Process a new lecture
-    // ----------------------------------------------------------------
+    public TranscriptionServiceImpl(LectureRepository lectureRepository,
+                                    LectureChunkRepository chunkRepository,
+                                    LectureProcessor processor,
+                                    AudioStorage audioStorage,
+                                    AudioMimeResolver mimeResolver,
+                                    EmbeddingProvider embeddingProvider,
+                                    AuthPlanClient planClient) {
+        this.lectureRepository = lectureRepository;
+        this.chunkRepository = chunkRepository;
+        this.processor = processor;
+        this.audioStorage = audioStorage;
+        this.mimeResolver = mimeResolver;
+        this.embeddingProvider = embeddingProvider;
+        this.planClient = planClient;
+    }
+
+    @Override
+    public LectureResponseDTO submitRecording(UUID userId,
+                                              MultipartFile audio,
+                                              String title,
+                                              String courseCode,
+                                              String language,
+                                              Integer durationSeconds) {
+
+        if (audio == null || audio.isEmpty()) {
+            throw ApiException.badRequest("No audio file was received.");
+        }
+        if (!mimeResolver.isSupported(audio.getOriginalFilename(), audio.getContentType())) {
+            throw ApiException.badRequest(
+                    "Unsupported audio format. Supported: " + mimeResolver.supportedExtensions() + ".");
+        }
+
+        // Checked before the bytes are read and stored — refusing after writing
+        // the file to disk would leave orphaned audio behind on every rejection.
+        requireQuota(userId);
+
+        byte[] content;
+        try {
+            content = audio.getBytes();
+        } catch (IOException e) {
+            throw ApiException.badRequest("The upload was interrupted. Please try again.");
+        }
+
+        String mimeType = mimeResolver.resolve(audio.getOriginalFilename(), audio.getContentType());
+
+        Lecture lecture = createPendingLecture(userId, title, courseCode, language, durationSeconds);
+        String storedPath = audioStorage.store(lecture.getId(), content, audio.getOriginalFilename());
+        if (storedPath != null) {
+            attachAudioPath(lecture.getId(), storedPath);
+        }
+
+        // Hand off to the background pipeline. The client gets its lecture id now
+        // and polls for progress.
+        processor.processAudio(lecture.getId(), content, mimeType);
+
+        log.info("Queued lecture {} for user {} ({} bytes, {})",
+                lecture.getId(), userId, content.length, mimeType);
+
+        return LectureResponseDTO.of(lecture, List.of(), 0);
+    }
+
+    @Override
+    public LectureResponseDTO submitDocument(UUID userId,
+                                             MultipartFile document,
+                                             String title,
+                                             String courseCode) {
+
+        if (document == null || document.isEmpty()) {
+            throw ApiException.badRequest("No file was received.");
+        }
+        if (!looksLikePdf(document)) {
+            throw ApiException.badRequest("Only PDF files can be imported at the moment.");
+        }
+
+        // Same check as a recording, and for the same reason: an import consumes
+        // a slot on the free plan exactly as a recording does. Charging
+        // differently for the same downstream work would be arbitrary, and
+        // leaving imports unmetered would make the cap trivial to sidestep.
+        requireQuota(userId);
+
+        byte[] content;
+        try {
+            content = document.getBytes();
+        } catch (IOException e) {
+            throw ApiException.badRequest("The upload was interrupted. Please try again.");
+        }
+
+        String fileName = document.getOriginalFilename();
+
+        // Duration is deliberately null: a PDF has no length in seconds, and
+        // inventing one from its page count would put a fictional "12 min" on
+        // the lecture card. The chunker already handles a null duration by
+        // omitting per-chunk timestamps.
+        Lecture lecture = lectureRepository.save(Lecture.builder()
+                .userId(userId)
+                .title(documentTitle(title, fileName))
+                .courseCode(blankToNull(courseCode))
+                .language("en")
+                .source(Lecture.LectureSource.PDF)
+                .status(LectureStatus.PENDING)
+                .statusDetail("Queued for import…")
+                .build());
+
+        processor.processDocument(lecture.getId(), content, fileName);
+
+        log.info("Queued document lecture {} for user {} ({} bytes, {})",
+                lecture.getId(), userId, content.length, fileName);
+
+        return LectureResponseDTO.of(lecture, List.of(), 0);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public UsageDTO usage(UUID userId) {
+        AuthPlanClient.PlanSummary plan = planClient.planFor(userId);
+        OffsetDateTime periodStart = startOfMonth();
+
+        long used = lectureRepository.countByUserIdAndCreatedAtGreaterThanEqual(userId, periodStart);
+        Integer limit = plan.monthlyRecordingLimit();
+
+        return new UsageDTO(
+                // The client only knows FREE and PRO. If auth was unreachable the
+                // tier is genuinely unknown, and FREE is the honest guess — the
+                // null limit below still says "allowance unknown", so the card
+                // shows the count without inventing a cap.
+                plan.isPro() ? "PRO" : "FREE",
+                (int) used,
+                limit,
+                limit == null ? null : Math.max(0, limit - (int) used),
+                periodStart.plusMonths(1));
+    }
+
+    /**
+     * Rejects the upload when a Free-tier student has used their month.
+     *
+     * <p>402 rather than 403: the request is well-formed and the student is
+     * perfectly entitled to make it — they just have to be on a paid tier. The
+     * app keys its upgrade prompt off that status.
+     */
+    private void requireQuota(UUID userId) {
+        AuthPlanClient.PlanSummary plan = planClient.planFor(userId);
+        if (plan.isUnlimited()) {
+            return;
+        }
+
+        int limit = plan.monthlyRecordingLimit();
+        long used = lectureRepository.countByUserIdAndCreatedAtGreaterThanEqual(userId, startOfMonth());
+
+        if (used >= limit) {
+            log.info("User {} hit the {} recording cap ({}/{})", userId, plan.plan(), used, limit);
+            throw ApiException.quotaExceeded(
+                    "You have used all " + limit + " recordings on your free plan this month. "
+                            + "Upgrade to Cleveft Pro for unlimited recordings.");
+        }
+    }
+
+    /**
+     * Calendar months, in UTC, so the allowance resets on a date the student can
+     * predict. A rolling 30-day window would be fairer but means never being
+     * able to answer "when do I get more?" with a date.
+     */
+    private static OffsetDateTime startOfMonth() {
+        return OffsetDateTime.now(ZoneOffset.UTC)
+                .withDayOfMonth(1)
+                .truncatedTo(ChronoUnit.DAYS);
+    }
+
+    /**
+     * Not annotated: {@code submitRecording} calls this on itself, and a
+     * self-invocation never passes through the transactional proxy. The
+     * repository's own save is transactional, which is all this needs.
+     */
+    private Lecture createPendingLecture(UUID userId, String title, String courseCode,
+                                         String language, Integer durationSeconds) {
+        return lectureRepository.save(Lecture.builder()
+                .userId(userId)
+                .title(defaultedTitle(title))
+                .courseCode(blankToNull(courseCode))
+                .language(language == null || language.isBlank() ? "en" : language)
+                .durationSeconds(durationSeconds)
+                .status(LectureStatus.PENDING)
+                .statusDetail("Queued for transcription…")
+                .build());
+    }
+
+    private void attachAudioPath(UUID lectureId, String path) {
+        lectureRepository.findById(lectureId).ifPresent(lecture -> {
+            lecture.setAudioPath(path);
+            lectureRepository.save(lecture);
+        });
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<LectureSummaryDTO> listLectures(UUID userId) {
+        return lectureRepository.findByUserIdOrderByCreatedAtDesc(userId).stream()
+                .map(lecture -> LectureSummaryDTO.of(
+                        lecture,
+                        (int) chunkRepository.countByLectureId(lecture.getId()),
+                        chunkRepository.findDistinctTopicTags(lecture.getId())))
+                .toList();
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public LectureResponseDTO getLecture(UUID userId, UUID lectureId) {
+        Lecture lecture = requireOwned(userId, lectureId);
+
+        List<ChunkResponseDTO> chunks = chunkRepository
+                .findByLectureIdOrderByChunkIndexAsc(lectureId).stream()
+                .map(ChunkResponseDTO::from)
+                .toList();
+
+        return LectureResponseDTO.of(lecture, chunks, chunks.size());
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public LectureStatusDTO getStatus(UUID userId, UUID lectureId) {
+        Lecture lecture = requireOwned(userId, lectureId);
+        return LectureStatusDTO.of(lecture, (int) chunkRepository.countByLectureId(lectureId));
+    }
 
     @Override
     @Transactional
-    public LectureResponseDTO processLecture(TranscriptionRequestDTO request) {
-        log.info("Processing new lecture: {}", request.getTitle());
+    public LectureResponseDTO updateLecture(UUID userId, UUID lectureId, UpdateLectureRequestDTO request) {
+        Lecture lecture = requireOwned(userId, lectureId);
 
-        // 1. Persist the lecture record in PENDING state
-        Lecture lecture = Lecture.builder()
-                .title(request.getTitle())
-                .courseCode(request.getCourseCode())
-                .sourceUrl(request.getSourceUrl())
-                .language(request.getLanguage())
-                .durationSeconds(request.getDurationSeconds())
-                .status(LectureStatus.PENDING)
-                .userId(UUID.randomUUID()) // Mock user ID to satisfy NOT NULL constraint
-                .build();
+        if (request.title() != null && !request.title().isBlank()) {
+            lecture.setTitle(request.title().trim());
+        }
+        if (request.courseCode() != null) {
+            lecture.setCourseCode(blankToNull(request.courseCode()));
+        }
 
-        lecture = lectureRepository.save(lecture);
-        log.debug("Lecture saved with ID: {}", lecture.getId());
+        boolean transcriptChanged = request.hasTranscriptEdit()
+                && !request.fullTranscript().equals(lecture.getFullTranscript());
 
-        // 2. Simulate transcription processing
-        try {
+        if (transcriptChanged) {
+            lecture.setFullTranscript(request.fullTranscript());
             lecture.setStatus(LectureStatus.PROCESSING);
-            lecture = lectureRepository.save(lecture);
-
-            List<LectureChunk> chunks = generateMockChunks(lecture);
-            chunkRepository.saveAll(chunks);
-            log.info("Generated {} mock chunks for lecture {}", chunks.size(), lecture.getId());
-
-            // 3. Build the full transcript from chunks
-            String fullTranscript = chunks.stream()
-                    .sorted(Comparator.comparingInt(LectureChunk::getChunkIndex))
-                    .map(LectureChunk::getContent)
-                    .collect(Collectors.joining(" "));
-
-            lecture.setFullTranscript(fullTranscript);
-            lecture.setStatus(LectureStatus.COMPLETED);
-            lecture = lectureRepository.save(lecture);
-
-            log.info("Lecture {} processing completed successfully", lecture.getId());
-        } catch (Exception e) {
-            log.error("Failed to process lecture {}: {}", lecture.getId(), e.getMessage(), e);
-            lecture.setStatus(LectureStatus.FAILED);
-            lectureRepository.save(lecture);
+            lecture.setStatusDetail("Re-indexing your edits…");
         }
 
-        return mapToLectureResponse(lecture, true);
-    }
+        lectureRepository.save(lecture);
 
-    // ----------------------------------------------------------------
-    //  Retrieve a lecture by ID
-    // ----------------------------------------------------------------
-
-    @Override
-    @Transactional(readOnly = true)
-    public LectureResponseDTO getLectureById(UUID lectureId) {
-        log.debug("Fetching lecture by ID: {}", lectureId);
-
-        Lecture lecture = lectureRepository.findById(lectureId)
-                .orElseThrow(() -> new EntityNotFoundException(
-                        "Lecture not found with ID: " + lectureId));
-
-        return mapToLectureResponse(lecture, true);
-    }
-
-    // ----------------------------------------------------------------
-    //  Retrieve all lectures
-    // ----------------------------------------------------------------
-
-    @Override
-    @Transactional(readOnly = true)
-    public List<LectureResponseDTO> getAllLectures() {
-        log.debug("Fetching all lectures");
-
-        return lectureRepository.findAll().stream()
-                .sorted(Comparator.comparing(Lecture::getCreatedAt).reversed())
-                .map(lecture -> mapToLectureResponse(lecture, false))
-                .collect(Collectors.toList());
-    }
-
-    // ----------------------------------------------------------------
-    //  Vector similarity search — global
-    // ----------------------------------------------------------------
-
-    @Override
-    @Transactional(readOnly = true)
-    public List<ChunkResponseDTO> searchChunksByEmbedding(float[] queryEmbedding, int topK) {
-        log.debug("Searching chunks globally, topK={}", topK);
-
-        String embeddingStr = embeddingToString(queryEmbedding);
-        List<LectureChunk> results = chunkRepository.findTopKByCosineDistance(embeddingStr, topK);
-
-        return results.stream()
-                .map(this::mapToChunkResponse)
-                .collect(Collectors.toList());
-    }
-
-    // ----------------------------------------------------------------
-    //  Vector similarity search — scoped to a lecture
-    // ----------------------------------------------------------------
-
-    @Override
-    @Transactional(readOnly = true)
-    public List<ChunkResponseDTO> searchChunksByLectureAndEmbedding(UUID lectureId, float[] queryEmbedding, int topK) {
-        log.debug("Searching chunks for lecture {}, topK={}", lectureId, topK);
-
-        // Verify the lecture exists
-        if (!lectureRepository.existsById(lectureId)) {
-            throw new EntityNotFoundException("Lecture not found with ID: " + lectureId);
+        // Queued after the write so the pipeline reads the committed transcript.
+        if (transcriptChanged) {
+            processor.reindexTranscript(lectureId, request.fullTranscript());
         }
 
-        String embeddingStr = embeddingToString(queryEmbedding);
-        List<LectureChunk> results = chunkRepository.findTopKByLectureAndCosineDistance(
-                lectureId, embeddingStr, topK);
-
-        return results.stream()
-                .map(this::mapToChunkResponse)
-                .collect(Collectors.toList());
+        return LectureResponseDTO.of(lecture, List.of(),
+                (int) chunkRepository.countByLectureId(lectureId));
     }
 
-    // ================================================================
-    //  Private helpers
-    // ================================================================
+    @Override
+    @Transactional
+    public LectureResponseDTO retryProcessing(UUID userId, UUID lectureId) {
+        Lecture lecture = requireOwned(userId, lectureId);
 
-    /**
-     * Generates mock transcription chunks with simulated text and random embeddings.
-     * In production, this would be replaced by actual ASR + embedding model calls.
-     */
-    private List<LectureChunk> generateMockChunks(Lecture lecture) {
-        int totalChunks = (lecture.getDurationSeconds() != null)
-                ? Math.max(1, (int) Math.ceil(lecture.getDurationSeconds() / CHUNK_DURATION_SECONDS))
-                : DEFAULT_CHUNK_COUNT;
-
-        List<LectureChunk> chunks = new ArrayList<>();
-        Random random = new Random(lecture.getId().hashCode()); // deterministic for same lecture
-
-        for (int i = 0; i < totalChunks; i++) {
-            double startTime = i * CHUNK_DURATION_SECONDS;
-            double endTime = Math.min(startTime + CHUNK_DURATION_SECONDS,
-                    lecture.getDurationSeconds() != null ? lecture.getDurationSeconds() : (i + 1) * CHUNK_DURATION_SECONDS);
-
-            LectureChunk chunk = LectureChunk.builder()
-                    .lecture(lecture)
-                    .chunkIndex(i)
-                    .content(generateMockTranscriptSegment(i, lecture.getTitle()))
-                    .startTime(startTime)
-                    .endTime(endTime)
-                    .embedding(generateMockEmbedding(random))
-                    .build();
-
-            chunks.add(chunk);
+        if (lecture.getStatus() == LectureStatus.PROCESSING) {
+            throw ApiException.badRequest("This lecture is already being processed.");
         }
 
-        return chunks;
-    }
-
-    /**
-     * Produces a placeholder transcript segment for a given chunk index.
-     */
-    private String generateMockTranscriptSegment(int chunkIndex, String lectureTitle) {
-        return String.format(
-                "[Chunk %d] This is a simulated transcript segment for \"%s\". "
-                        + "In production, this text would be generated by an ASR engine processing the audio stream.",
-                chunkIndex, lectureTitle
-        );
-    }
-
-    /**
-     * Generates a random unit-normalized embedding vector of {@link #VECTOR_DIMENSIONS} dimensions.
-     */
-    private float[] generateMockEmbedding(Random random) {
-        float[] embedding = new float[VECTOR_DIMENSIONS];
-        float sumSquares = 0.0f;
-
-        for (int i = 0; i < VECTOR_DIMENSIONS; i++) {
-            embedding[i] = (float) random.nextGaussian();
-            sumSquares += embedding[i] * embedding[i];
-        }
-
-        // L2-normalize so cosine distance is meaningful
-        float norm = (float) Math.sqrt(sumSquares);
-        if (norm > 0) {
-            for (int i = 0; i < VECTOR_DIMENSIONS; i++) {
-                embedding[i] /= norm;
+        /*
+         * An imported lecture retries from its transcript, not from its source.
+         *
+         * The uploaded PDF is not retained — extraction is deterministic and
+         * re-running it would produce the identical text. What *can* fail is
+         * everything after it: the embedding and note-structuring calls both
+         * hit an external model. Since the transcript was saved before that
+         * point, re-indexing recovers exactly the failure worth recovering
+         * from, without keeping the original file around for it.
+         */
+        if (lecture.getSource() != Lecture.LectureSource.RECORDING) {
+            String transcript = lecture.getFullTranscript();
+            if (transcript == null || transcript.isBlank()) {
+                throw ApiException.badRequest(
+                        "Nothing was read from that file, so there is nothing to retry. "
+                                + "Import it again.");
             }
+
+            lecture.setStatus(LectureStatus.PENDING);
+            lecture.setStatusDetail("Queued for another attempt…");
+            lectureRepository.save(lecture);
+
+            processor.reindexTranscript(lectureId, transcript);
+
+            log.info("Retrying imported lecture {} for user {} from its stored transcript",
+                    lectureId, userId);
+
+            return LectureResponseDTO.of(lecture, List.of(),
+                    (int) chunkRepository.countByLectureId(lectureId));
         }
 
-        return embedding;
+        if (lecture.getAudioPath() == null) {
+            throw ApiException.badRequest(
+                    "The original recording is no longer available, so this lecture can't be retried.");
+        }
+
+        byte[] content = audioStorage.load(lecture.getAudioPath());
+        if (content == null) {
+            throw ApiException.badRequest(
+                    "The original recording could not be read, so this lecture can't be retried.");
+        }
+
+        String storedFilename = java.nio.file.Paths.get(lecture.getAudioPath()).getFileName().toString();
+        String mimeType = mimeResolver.resolve(storedFilename, null);
+
+        lecture.setStatus(LectureStatus.PENDING);
+        lecture.setStatusDetail("Queued for another attempt…");
+        lectureRepository.save(lecture);
+
+        // Hand off to the background pipeline, same as the original submission.
+        processor.processAudio(lectureId, content, mimeType);
+
+        log.info("Retrying lecture {} for user {} ({} bytes, {})",
+                lectureId, userId, content.length, mimeType);
+
+        return LectureResponseDTO.of(lecture, List.of(),
+                (int) chunkRepository.countByLectureId(lectureId));
+    }
+
+    @Override
+    @Transactional
+    public void deleteLecture(UUID userId, UUID lectureId) {
+        Lecture lecture = requireOwned(userId, lectureId);
+        String audioPath = lecture.getAudioPath();
+
+        // Chunks cascade at the database level, but removing them explicitly
+        // keeps the persistence context honest.
+        chunkRepository.deleteByLectureId(lectureId);
+        lectureRepository.delete(lecture);
+
+        audioStorage.delete(audioPath);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<ChunkMatchDTO> search(UUID userId, SearchRequestDTO request) {
+        float[] queryVector = embeddingProvider.embedQuery(request.question());
+
+        List<LectureChunkRepository.ChunkMatch> matches = chunkRepository.searchByEmbedding(
+                userId,
+                request.lectureId() == null ? null : request.lectureId().toString(),
+                ChunkVectorWriter.toVectorLiteral(queryVector),
+                request.effectiveTopK());
+
+        return matches.stream().map(ChunkMatchDTO::from).toList();
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public LibraryStats stats(UUID userId) {
+        long total = lectureRepository.countByUserId(userId);
+        long completed = lectureRepository.countByUserIdAndStatus(userId, LectureStatus.COMPLETED);
+        long processing = lectureRepository.countByUserIdAndStatus(userId, LectureStatus.PROCESSING)
+                + lectureRepository.countByUserIdAndStatus(userId, LectureStatus.PENDING);
+
+        long chunks = lectureRepository.findByUserIdOrderByCreatedAtDesc(userId).stream()
+                .mapToLong(lecture -> chunkRepository.countByLectureId(lecture.getId()))
+                .sum();
+
+        return new LibraryStats(total, completed, processing, chunks);
+    }
+
+    // ------------------------------------------------------------------
+
+    private Lecture requireOwned(UUID userId, UUID lectureId) {
+        return lectureRepository.findByIdAndUserId(lectureId, userId)
+                // Deliberately 404 rather than 403: confirming that a lecture
+                // exists but belongs to somebody else is itself a disclosure.
+                .orElseThrow(() -> ApiException.notFound("Lecture not found."));
+    }
+
+    private static String defaultedTitle(String title) {
+        if (title != null && !title.isBlank()) {
+            return title.trim();
+        }
+        return "Lecture " + java.time.LocalDate.now();
     }
 
     /**
-     * Converts a float[] embedding to the pgvector string format: {@code [0.1,0.2,...]}.
+     * Falls back to the file's own name, which is nearly always more useful
+     * than a date — students name lecture PDFs things like
+     * "EE355-Lecture4-BJT.pdf", and that beats "Lecture 2026-07-26".
      */
-    private String embeddingToString(float[] embedding) {
-        if (embedding == null || embedding.length == 0) {
-            throw new IllegalArgumentException("Query embedding must not be null or empty");
+    private static String documentTitle(String title, String fileName) {
+        if (title != null && !title.isBlank()) {
+            return title.trim();
+        }
+        if (fileName == null || fileName.isBlank()) {
+            return "Document " + java.time.LocalDate.now();
         }
 
-        StringBuilder sb = new StringBuilder("[");
-        for (int i = 0; i < embedding.length; i++) {
-            if (i > 0) sb.append(",");
-            sb.append(embedding[i]);
-        }
-        sb.append("]");
-        return sb.toString();
+        String stem = fileName.contains(".")
+                ? fileName.substring(0, fileName.lastIndexOf('.'))
+                : fileName;
+        // Separators become spaces so the title reads as words rather than as a
+        // filename someone forgot to tidy up.
+        stem = stem.replaceAll("[_-]+", " ").replaceAll("\\s{2,}", " ").trim();
+
+        return stem.isBlank() ? "Document " + java.time.LocalDate.now() : stem;
     }
 
-    // ----------------------------------------------------------------
-    //  Entity → DTO mapping
-    // ----------------------------------------------------------------
-
-    private LectureResponseDTO mapToLectureResponse(Lecture lecture, boolean includeChunks) {
-        List<ChunkResponseDTO> chunkDTOs = null;
-        int totalChunks;
-
-        if (includeChunks) {
-            List<LectureChunk> chunks = chunkRepository.findByLectureIdOrderByChunkIndexAsc(lecture.getId());
-            chunkDTOs = chunks.stream()
-                    .map(this::mapToChunkResponse)
-                    .collect(Collectors.toList());
-            totalChunks = chunkDTOs.size();
-        } else {
-            totalChunks = (int) chunkRepository.countByLectureId(lecture.getId());
+    /**
+     * Checked by magic bytes, not by extension.
+     *
+     * <p>A browser or file picker will happily report {@code application/pdf}
+     * for anything named {@code .pdf}, and the extension is chosen by whoever
+     * saved the file. Every real PDF begins with {@code %PDF-}, so reading five
+     * bytes settles it far more reliably than trusting either.
+     */
+    private static boolean looksLikePdf(MultipartFile file) {
+        try (var stream = file.getInputStream()) {
+            byte[] header = stream.readNBytes(5);
+            return header.length == 5
+                    && header[0] == '%' && header[1] == 'P' && header[2] == 'D'
+                    && header[3] == 'F' && header[4] == '-';
+        } catch (IOException e) {
+            return false;
         }
-
-        return LectureResponseDTO.builder()
-                .id(lecture.getId())
-                .title(lecture.getTitle())
-                .sourceUrl(lecture.getSourceUrl())
-                .language(lecture.getLanguage())
-                .durationSeconds(lecture.getDurationSeconds())
-                .status(lecture.getStatus())
-                .fullTranscript(lecture.getFullTranscript())
-                .totalChunks(totalChunks)
-                .chunks(chunkDTOs)
-                .createdAt(lecture.getCreatedAt())
-                .updatedAt(lecture.getUpdatedAt())
-                .build();
     }
 
-    private ChunkResponseDTO mapToChunkResponse(LectureChunk chunk) {
-        return ChunkResponseDTO.builder()
-                .id(chunk.getId())
-                .lectureId(chunk.getLecture().getId())
-                .chunkIndex(chunk.getChunkIndex())
-                .content(chunk.getContent())
-                .startTime(chunk.getStartTime())
-                .endTime(chunk.getEndTime())
-                .createdAt(chunk.getCreatedAt())
-                .build();
+    private static String blankToNull(String value) {
+        return (value == null || value.isBlank()) ? null : value.trim();
     }
 }

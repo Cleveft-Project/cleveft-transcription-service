@@ -1,60 +1,85 @@
 package com.cleveft.transcriptionservice.service;
 
-import com.cleveft.transcriptionservice.dto.ChunkResponseDTO;
+import com.cleveft.transcriptionservice.dto.ChunkMatchDTO;
 import com.cleveft.transcriptionservice.dto.LectureResponseDTO;
-import com.cleveft.transcriptionservice.dto.TranscriptionRequestDTO;
+import com.cleveft.transcriptionservice.dto.LectureStatusDTO;
+import com.cleveft.transcriptionservice.dto.LectureSummaryDTO;
+import com.cleveft.transcriptionservice.dto.SearchRequestDTO;
+import com.cleveft.transcriptionservice.dto.UpdateLectureRequestDTO;
+import com.cleveft.transcriptionservice.dto.UsageDTO;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
 import java.util.UUID;
 
-/**
- * Core service contract for lecture transcription workflows.
- */
 public interface TranscriptionService {
 
     /**
-     * Accepts an audio lecture request, persists the lecture record,
-     * and orchestrates transcription processing (chunking + embedding generation).
+     * Accepts a recording and queues it for transcription.
      *
-     * @param request the incoming transcription request metadata
-     * @return the created lecture summary with initial status
+     * @return the lecture in {@code PENDING}; processing continues in the
+     * background and the client polls {@link #getStatus}
      */
-    LectureResponseDTO processLecture(TranscriptionRequestDTO request);
+    LectureResponseDTO submitRecording(UUID userId,
+                                       MultipartFile audio,
+                                       String title,
+                                       String courseCode,
+                                       String language,
+                                       Integer durationSeconds);
 
     /**
-     * Retrieves a lecture summary by its unique identifier,
-     * including metadata, status, and all associated chunks.
+     * Accepts a PDF and queues it for import.
      *
-     * @param lectureId the lecture UUID
-     * @return the full lecture response with chunks
+     * <p>Behaves exactly like {@link #submitRecording} from the client's point
+     * of view — same 202, same status polling, same resulting lecture. Only the
+     * first stage of the pipeline differs: text is extracted from the document
+     * rather than transcribed from audio.
+     *
+     * @return the lecture in {@code PENDING}
      */
-    LectureResponseDTO getLectureById(UUID lectureId);
+    LectureResponseDTO submitDocument(UUID userId,
+                                      MultipartFile document,
+                                      String title,
+                                      String courseCode);
+
+    List<LectureSummaryDTO> listLectures(UUID userId);
+
+    LectureResponseDTO getLecture(UUID userId, UUID lectureId);
+
+    LectureStatusDTO getStatus(UUID userId, UUID lectureId);
+
+    LectureResponseDTO updateLecture(UUID userId, UUID lectureId, UpdateLectureRequestDTO request);
 
     /**
-     * Retrieves all lectures, ordered by creation date descending.
+     * Re-runs the pipeline for a lecture using the audio retained from the
+     * original upload — no re-recording required.
      *
-     * @return list of lecture summaries (without nested chunks)
+     * @throws com.cleveft.transcriptionservice.exception.ApiException if the
+     * lecture is already processing, or its audio was not retained (audio
+     * retention disabled, or the file has since been lost)
      */
-    List<LectureResponseDTO> getAllLectures();
+    LectureResponseDTO retryProcessing(UUID userId, UUID lectureId);
+
+    void deleteLecture(UUID userId, UUID lectureId);
 
     /**
-     * Searches for the most relevant timestamped chunks across all lectures
-     * using vector similarity (cosine distance) against the provided query embedding.
-     *
-     * @param queryEmbedding the query vector (768 dimensions)
-     * @param topK           maximum number of results to return
-     * @return matching chunks ordered by similarity
+     * Semantic search across the student's own lectures. Takes plain text — this
+     * service owns the embedding model so query and document vectors always come
+     * from the same place.
      */
-    List<ChunkResponseDTO> searchChunksByEmbedding(float[] queryEmbedding, int topK);
+    List<ChunkMatchDTO> search(UUID userId, SearchRequestDTO request);
+
+    /** Dashboard counters. */
+    LibraryStats stats(UUID userId);
 
     /**
-     * Searches for the most relevant timestamped chunks scoped to a specific lecture
-     * using vector similarity (cosine distance) against the provided query embedding.
+     * This period's recording usage against the caller's tier allowance.
      *
-     * @param lectureId      the lecture to scope the search to
-     * @param queryEmbedding the query vector (768 dimensions)
-     * @param topK           maximum number of results to return
-     * @return matching chunks ordered by similarity
+     * <p>Lives here rather than on the auth service because the count comes from
+     * the lectures this service owns; auth supplies only the allowance.
      */
-    List<ChunkResponseDTO> searchChunksByLectureAndEmbedding(UUID lectureId, float[] queryEmbedding, int topK);
+    UsageDTO usage(UUID userId);
+
+    record LibraryStats(long totalLectures, long completedLectures, long processingLectures, long totalChunks) {
+    }
 }
