@@ -30,6 +30,31 @@ public class GeminiClient {
     private static final Logger log = LoggerFactory.getLogger(GeminiClient.class);
     private static final String API_KEY_HEADER = "x-goog-api-key";
 
+    /**
+     * Low, because transcription and note structuring both want the model to
+     * follow the source rather than invent around it.
+     */
+    private static final double DEFAULT_TEMPERATURE = 0.2;
+
+    /**
+     * Used only after a RECITATION block. Higher variance makes the sampled
+     * output less likely to match memorised text closely enough to be refused,
+     * at the cost of a slightly looser transcript — which is strictly better
+     * than no transcript at all.
+     */
+    private static final double RECITATION_RETRY_TEMPERATURE = 0.75;
+
+    /**
+     * Google discarded the candidate because it resembled memorised training
+     * data. Internal to this class: callers see either a transcript or a
+     * plain-language {@link AiServiceException}, never this.
+     */
+    private static final class RecitationBlockedException extends RuntimeException {
+        private RecitationBlockedException(String message) {
+            super(message);
+        }
+    }
+
     private final GeminiProperties properties;
     private final RestClient restClient;
 
@@ -65,6 +90,33 @@ public class GeminiClient {
      *              file_data, in the order the model should see them
      */
     public String generateContent(String model, String systemInstruction, List<Map<String, Object>> parts) {
+        try {
+            return generateContent(model, systemInstruction, parts, DEFAULT_TEMPERATURE);
+        } catch (RecitationBlockedException blocked) {
+            // RECITATION is not deterministic: the filter compares the sampled
+            // output against memorised text, so a different sample often passes
+            // where the first did not. Retrying with more variance is the
+            // cheapest fix available, and costs one extra call only in the rare
+            // case that trips it.
+            log.warn("Model {} blocked its output as RECITATION; retrying at temperature {}",
+                    model, RECITATION_RETRY_TEMPERATURE);
+            try {
+                return generateContent(model, systemInstruction, parts, RECITATION_RETRY_TEMPERATURE);
+            } catch (RecitationBlockedException stillBlocked) {
+                throw new AiServiceException(
+                        "Google blocked this recording, because the audio closely matches text it "
+                        + "recognises from published material. This usually means the speaker was "
+                        + "reading aloud from a book, paper or slide deck. Re-recording in the "
+                        + "lecturer's own words normally works — or import the material as a PDF "
+                        + "instead, which does not go through speech-to-text.");
+            }
+        }
+    }
+
+    private String generateContent(String model,
+                                   String systemInstruction,
+                                   List<Map<String, Object>> parts,
+                                   double temperature) {
         requireApiKey();
 
         Map<String, Object> body = new LinkedHashMap<>();
@@ -73,7 +125,7 @@ public class GeminiClient {
             body.put("systemInstruction", Map.of("parts", List.of(Map.of("text", systemInstruction))));
         }
         body.put("generationConfig", Map.of(
-                "temperature", 0.2,
+                "temperature", temperature,
                 "maxOutputTokens", 65536));
 
         JsonNode response = post("/v1beta/models/" + model + ":generateContent", body);
@@ -100,6 +152,11 @@ public class GeminiClient {
         }
 
         if (text.isEmpty()) {
+            // Distinguished from every other empty response because it is the
+            // one worth retrying, and the one a student can actually act on.
+            if ("RECITATION".equals(finishReason)) {
+                throw new RecitationBlockedException("Candidate withheld as recitation by " + model);
+            }
             throw new AiServiceException("The AI model returned an empty response (finishReason="
                     + finishReason + ").");
         }
