@@ -49,6 +49,11 @@ cleveft:
     # bean that implements SttProvider and switching this value.
     provider: ${STT_PROVIDER:gemini}
 
+  video:
+    # Reads a linked video. Gemini fetches the URL itself, so nothing here
+    # downloads media — no yt-dlp, no ffmpeg, nothing extra in the image.
+    provider: ${VIDEO_PROVIDER:gemini}
+
   gemini:
     api-key: ${GOOGLE_API_KEY:}
     base-url: ${GEMINI_BASE_URL:https://generativelanguage.googleapis.com}
@@ -57,6 +62,9 @@ cleveft:
     # pool, so a lecture no longer spends the same allowance twice, and a PDF
     # import is unaffected by how much audio has been transcribed today.
     notes-model: ${GEMINI_NOTES_MODEL:gemini-3.5-flash}
+    # Separate again, and for the same reason: a student who has spent their
+    # speech-to-text allowance on recordings can still import a video.
+    video-model: ${GEMINI_VIDEO_MODEL:gemini-3.5-flash}
     embedding-model: ${GEMINI_EMBEDDING_MODEL:gemini-embedding-001}
     # Must equal the vector(n) width in init.sql.
     dimensions: 768

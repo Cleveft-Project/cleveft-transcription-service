@@ -3,6 +3,7 @@ package com.cleveft.transcriptionservice.service;
 import com.cleveft.transcriptionservice.ai.AiServiceException;
 import com.cleveft.transcriptionservice.ai.EmbeddingProvider;
 import com.cleveft.transcriptionservice.ai.SttProvider;
+import com.cleveft.transcriptionservice.ai.VideoProvider;
 import com.cleveft.transcriptionservice.model.Lecture;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -37,6 +38,7 @@ public class LectureProcessor {
     private final TranscriptChunker chunker;
     private final NoteStructuringService noteStructuringService;
     private final DocumentTextExtractor documentTextExtractor;
+    private final VideoProvider videoProvider;
 
     public LectureProcessor(LectureJobStore store,
                             com.cleveft.transcriptionservice.repository.ChunkVectorWriter vectorWriter,
@@ -44,7 +46,8 @@ public class LectureProcessor {
                             EmbeddingProvider embeddingProvider,
                             TranscriptChunker chunker,
                             NoteStructuringService noteStructuringService,
-                            DocumentTextExtractor documentTextExtractor) {
+                            DocumentTextExtractor documentTextExtractor,
+                            VideoProvider videoProvider) {
         this.store = store;
         this.vectorWriter = vectorWriter;
         this.sttProvider = sttProvider;
@@ -52,6 +55,7 @@ public class LectureProcessor {
         this.chunker = chunker;
         this.noteStructuringService = noteStructuringService;
         this.documentTextExtractor = documentTextExtractor;
+        this.videoProvider = videoProvider;
     }
 
     /**
@@ -116,6 +120,40 @@ public class LectureProcessor {
             store.markFailed(lectureId, e.getMessage());
         } catch (Exception e) {
             log.error("Unexpected failure processing document lecture {}", lectureId, e);
+            store.markFailed(lectureId, "Processing failed unexpectedly. Please try again.");
+        }
+    }
+
+    /**
+     * The same pipeline again, entered from a link.
+     *
+     * <p>Nothing here downloads anything: the URL is handed to the model, which
+     * fetches the video itself. That is what keeps this free of a media
+     * downloader, ffmpeg and the container bloat both would bring — and on the
+     * right side of YouTube's terms.
+     *
+     * <p>Unlike a recording or a PDF, the source survives the import, because a
+     * URL costs nothing to keep. {@code retryProcessing} uses that to re-read
+     * the video outright when the first read produced nothing.
+     */
+    @Async("transcriptionExecutor")
+    public void processVideo(UUID lectureId, String url) {
+        log.info("Starting video pipeline for lecture {} ({})", lectureId, url);
+
+        try {
+            store.markProcessing(lectureId, "Watching the video…");
+
+            String transcript = videoProvider.describe(url);
+            store.saveTranscript(lectureId, transcript);
+
+            index(lectureId, transcript);
+            log.info("Lecture {} completed from video ({} characters)", lectureId, transcript.length());
+
+        } catch (AiServiceException e) {
+            log.error("Video import failed for lecture {}: {}", lectureId, e.getMessage());
+            store.markFailed(lectureId, e.getMessage());
+        } catch (Exception e) {
+            log.error("Unexpected failure processing video lecture {}", lectureId, e);
             store.markFailed(lectureId, "Processing failed unexpectedly. Please try again.");
         }
     }

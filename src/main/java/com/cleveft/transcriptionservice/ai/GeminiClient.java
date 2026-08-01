@@ -44,6 +44,14 @@ public class GeminiClient {
      */
     private static final double RECITATION_RETRY_TEMPERATURE = 0.75;
 
+    /** Default advice, written for the case that trips this most often. */
+    private static final String RECORDING_BLOCKED_MESSAGE =
+            "Google blocked this recording, because the audio closely matches text it "
+            + "recognises from published material. This usually means the speaker was "
+            + "reading aloud from a book, paper or slide deck. Re-recording in the "
+            + "lecturer's own words normally works — or import the material as a PDF "
+            + "instead, which does not go through speech-to-text.";
+
     /**
      * Google discarded the candidate because it resembled memorised training
      * data. Internal to this class: callers see either a transcript or a
@@ -90,6 +98,23 @@ public class GeminiClient {
      *              file_data, in the order the model should see them
      */
     public String generateContent(String model, String systemInstruction, List<Map<String, Object>> parts) {
+        return generateContent(model, systemInstruction, parts, RECORDING_BLOCKED_MESSAGE);
+    }
+
+    /**
+     * As above, but with wording for a source that is not a recording.
+     *
+     * <p>The advice that fixes a RECITATION block depends entirely on what was
+     * submitted — "re-record in the lecturer's own words" is useless to someone
+     * who pasted a link. The retry is identical either way; only the sentence
+     * the student reads at the end of it differs.
+     *
+     * @param blockedMessage shown verbatim once both attempts have been refused
+     */
+    public String generateContent(String model,
+                                  String systemInstruction,
+                                  List<Map<String, Object>> parts,
+                                  String blockedMessage) {
         try {
             return generateContent(model, systemInstruction, parts, DEFAULT_TEMPERATURE);
         } catch (RecitationBlockedException blocked) {
@@ -103,12 +128,7 @@ public class GeminiClient {
             try {
                 return generateContent(model, systemInstruction, parts, RECITATION_RETRY_TEMPERATURE);
             } catch (RecitationBlockedException stillBlocked) {
-                throw new AiServiceException(
-                        "Google blocked this recording, because the audio closely matches text it "
-                        + "recognises from published material. This usually means the speaker was "
-                        + "reading aloud from a book, paper or slide deck. Re-recording in the "
-                        + "lecturer's own words normally works — or import the material as a PDF "
-                        + "instead, which does not go through speech-to-text.");
+                throw new AiServiceException(blockedMessage);
             }
         }
     }

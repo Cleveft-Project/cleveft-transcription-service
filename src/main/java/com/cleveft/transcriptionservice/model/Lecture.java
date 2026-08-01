@@ -43,6 +43,21 @@ public class Lecture {
     @Column(name = "source_url", length = 1000)
     private String sourceUrl;
 
+    /**
+     * The lecture this one was imported to help explain, if any.
+     *
+     * <p>Students mostly go looking for a video because something in a specific
+     * class did not land. Recording that link is what lets the app answer "what
+     * else do I have on functional dependencies?" and what keeps supporting
+     * material out of the exam readiness calculation — a video explains what you
+     * were taught, it does not decide what you will be examined on.
+     *
+     * <p>Null for anything imported on its own, which stays a perfectly ordinary
+     * library item.
+     */
+    @Column(name = "related_lecture_id")
+    private UUID relatedLectureId;
+
     /** Where the original recording was persisted, for re-processing. */
     @Column(name = "audio_path", length = 1000)
     private String audioPath;
@@ -131,6 +146,14 @@ public class Lecture {
 
     public void setSourceUrl(String sourceUrl) {
         this.sourceUrl = sourceUrl;
+    }
+
+    public UUID getRelatedLectureId() {
+        return relatedLectureId;
+    }
+
+    public void setRelatedLectureId(UUID relatedLectureId) {
+        this.relatedLectureId = relatedLectureId;
     }
 
     public String getAudioPath() {
@@ -260,6 +283,11 @@ public class Lecture {
 
         public Builder source(LectureSource source) {
             lecture.source = source;
+            return this;
+        }
+
+        public Builder relatedLectureId(UUID relatedLectureId) {
+            lecture.relatedLectureId = relatedLectureId;
             return this;
         }
 

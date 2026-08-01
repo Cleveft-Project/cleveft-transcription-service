@@ -1,6 +1,7 @@
 package com.cleveft.transcriptionservice.controller;
 
 import com.cleveft.transcriptionservice.dto.ChunkMatchDTO;
+import com.cleveft.transcriptionservice.dto.ImportVideoRequestDTO;
 import com.cleveft.transcriptionservice.dto.LectureResponseDTO;
 import com.cleveft.transcriptionservice.dto.LectureStatusDTO;
 import com.cleveft.transcriptionservice.dto.LectureSummaryDTO;
@@ -85,6 +86,28 @@ public class TranscriptionController {
 
         LectureResponseDTO lecture = transcriptionService.submitDocument(
                 requireUserId(userId), file, title, courseCode);
+
+        return ResponseEntity.status(HttpStatus.ACCEPTED).body(lecture);
+    }
+
+    /**
+     * Imports a YouTube video and queues it for indexing.
+     *
+     * <p>Its own route for the same reason documents have one: what arrives is a
+     * link, not a file, so this is the only import that is not multipart.
+     * Everything after the first pipeline stage is identical to the other two.
+     */
+    @PostMapping(path = "/videos", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<LectureResponseDTO> importVideo(
+            @RequestHeader(value = "X-User-Id", required = false) String userId,
+            @Valid @RequestBody ImportVideoRequestDTO request) {
+
+        LectureResponseDTO lecture = transcriptionService.submitVideo(
+                requireUserId(userId),
+                request.url(),
+                request.title(),
+                request.courseCode(),
+                request.relatedLectureId());
 
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(lecture);
     }

@@ -42,6 +42,24 @@ public interface TranscriptionService {
                                       String title,
                                       String courseCode);
 
+    /**
+     * Accepts a YouTube link and queues it for import.
+     *
+     * <p>The third door into the same pipeline. Nothing is downloaded — the URL
+     * goes to the model, which reads the video itself.
+     *
+     * @param relatedLectureId the lecture this video was imported to help
+     *                         explain, or null for a standalone item. Supporting
+     *                         material is excluded from exam readiness, so this
+     *                         is what keeps the meter honest.
+     * @return the lecture in {@code PENDING}
+     */
+    LectureResponseDTO submitVideo(UUID userId,
+                                   String url,
+                                   String title,
+                                   String courseCode,
+                                   UUID relatedLectureId);
+
     List<LectureSummaryDTO> listLectures(UUID userId);
 
     LectureResponseDTO getLecture(UUID userId, UUID lectureId);

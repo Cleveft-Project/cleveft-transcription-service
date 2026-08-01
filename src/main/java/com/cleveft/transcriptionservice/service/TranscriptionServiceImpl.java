@@ -155,6 +155,62 @@ public class TranscriptionServiceImpl implements TranscriptionService {
     }
 
     @Override
+    public LectureResponseDTO submitVideo(UUID userId,
+                                          String url,
+                                          String title,
+                                          String courseCode,
+                                          UUID relatedLectureId) {
+
+        YouTubeUrl video;
+        try {
+            video = YouTubeUrl.parse(url);
+        } catch (YouTubeUrl.InvalidVideoUrlException e) {
+            // Its messages are written for the student, so they pass straight
+            // through rather than being replaced with a generic 400.
+            throw ApiException.badRequest(e.getMessage());
+        }
+
+        // Ownership is checked before anything is created, so a student cannot
+        // attach material to somebody else's lecture by guessing an id.
+        if (relatedLectureId != null) {
+            requireOwned(userId, relatedLectureId);
+        }
+
+        // The same video twice would split one topic's chunks across two rows
+        // and quietly halve the retrieval quality for it.
+        lectureRepository.findFirstByUserIdAndSourceUrl(userId, video.canonical())
+                .ifPresent(existing -> {
+                    throw ApiException.badRequest(
+                            "You have already imported that video as \"" + existing.getTitle() + "\".");
+                });
+
+        requireQuota(userId);
+
+        // Title is deliberately provisional. The real one comes from the video
+        // itself, and asking a student to name something they have not watched
+        // yet is a worse question than showing them a placeholder that fixes
+        // itself once the notes come back.
+        Lecture lecture = lectureRepository.save(Lecture.builder()
+                .userId(userId)
+                .title(blankToNull(title) == null ? "Imported video" : title.trim())
+                .courseCode(blankToNull(courseCode))
+                .language("en")
+                .source(Lecture.LectureSource.YOUTUBE)
+                .sourceUrl(video.canonical())
+                .relatedLectureId(relatedLectureId)
+                .status(LectureStatus.PENDING)
+                .statusDetail("Queued for import…")
+                .build());
+
+        processor.processVideo(lecture.getId(), video.canonical());
+
+        log.info("Queued video lecture {} for user {} ({}, related to {})",
+                lecture.getId(), userId, video.canonical(), relatedLectureId);
+
+        return LectureResponseDTO.of(lecture, List.of(), 0);
+    }
+
+    @Override
     @Transactional(readOnly = true)
     public UsageDTO usage(UUID userId) {
         AuthPlanClient.PlanSummary plan = planClient.planFor(userId);
@@ -317,6 +373,31 @@ public class TranscriptionServiceImpl implements TranscriptionService {
          * point, re-indexing recovers exactly the failure worth recovering
          * from, without keeping the original file around for it.
          */
+        /*
+         * A video is the one source that outlives its own import.
+         *
+         * The PDF is not retained and the audio may not be, but a URL costs
+         * nothing to keep — so when the first read produced no transcript at
+         * all, this can go back to the video itself rather than telling the
+         * student to paste the same link again.
+         */
+        if (lecture.getSource() == Lecture.LectureSource.YOUTUBE
+                && isBlank(lecture.getFullTranscript())
+                && !isBlank(lecture.getSourceUrl())) {
+
+            lecture.setStatus(LectureStatus.PENDING);
+            lecture.setStatusDetail("Queued for another attempt…");
+            lectureRepository.save(lecture);
+
+            processor.processVideo(lectureId, lecture.getSourceUrl());
+
+            log.info("Retrying video lecture {} for user {} from {}",
+                    lectureId, userId, lecture.getSourceUrl());
+
+            return LectureResponseDTO.of(lecture, List.of(),
+                    (int) chunkRepository.countByLectureId(lectureId));
+        }
+
         if (lecture.getSource() != Lecture.LectureSource.RECORDING) {
             String transcript = lecture.getFullTranscript();
             if (transcript == null || transcript.isBlank()) {
@@ -465,6 +546,10 @@ public class TranscriptionServiceImpl implements TranscriptionService {
         } catch (IOException e) {
             return false;
         }
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.isBlank();
     }
 
     private static String blankToNull(String value) {

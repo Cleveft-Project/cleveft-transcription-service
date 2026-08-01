@@ -21,6 +21,8 @@ public record LectureResponseDTO(
         /** Recording, imported PDF or YouTube. */
         Lecture.LectureSource source,
         String sourceUrl,
+        /** The lecture this was imported to help explain, or null. */
+        UUID relatedLectureId,
         String fullTranscript,
         List<Map<String, Object>> structuredNotes,
         List<Map<String, Object>> keyConcepts,
@@ -41,6 +43,7 @@ public record LectureResponseDTO(
                 lecture.getStatusDetail(),
                 lecture.getSource(),
                 lecture.getSourceUrl(),
+                lecture.getRelatedLectureId(),
                 lecture.getFullTranscript(),
                 lecture.getStructuredNotes(),
                 lecture.getKeyConcepts(),

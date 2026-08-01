@@ -33,6 +33,14 @@ public record GeminiProperties(
          * refused because a recording had exhausted the STT model earlier.
          */
         String notesModel,
+        /**
+         * Model used to read a linked video.
+         *
+         * Separate for the same reason as {@link #notesModel}: quota is per
+         * model, and a student who has spent their speech-to-text allowance on
+         * recordings should still be able to import a video.
+         */
+        String videoModel,
         String embeddingModel,
         int dimensions,
         long inlineLimitBytes,
@@ -50,6 +58,9 @@ public record GeminiProperties(
         }
         if (notesModel == null || notesModel.isBlank()) {
             notesModel = "gemini-3.5-flash";
+        }
+        if (videoModel == null || videoModel.isBlank()) {
+            videoModel = "gemini-3.5-flash";
         }
         if (embeddingModel == null || embeddingModel.isBlank()) {
             embeddingModel = "gemini-embedding-001";

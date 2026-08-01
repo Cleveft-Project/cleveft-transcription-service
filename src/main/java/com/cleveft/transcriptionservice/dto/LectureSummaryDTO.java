@@ -20,6 +20,12 @@ public record LectureSummaryDTO(
         String statusDetail,
         /** Recording, imported PDF or YouTube — shown as a badge on the card. */
         Lecture.LectureSource source,
+        /**
+         * The lecture this was imported to help explain, or null if it stands
+         * alone. Lets the library group supporting material under its lecture
+         * instead of scattering videos through the list by date.
+         */
+        UUID relatedLectureId,
         int totalChunks,
         /** Key-concept terms, for display on the lecture card. */
         List<String> topics,
@@ -44,6 +50,7 @@ public record LectureSummaryDTO(
                 lecture.getStatus(),
                 lecture.getStatusDetail(),
                 lecture.getSource(),
+                lecture.getRelatedLectureId(),
                 totalChunks,
                 topicsOf(lecture),
                 topicTags == null ? List.of() : topicTags,

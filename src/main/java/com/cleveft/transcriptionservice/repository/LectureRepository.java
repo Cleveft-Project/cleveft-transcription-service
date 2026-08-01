@@ -21,6 +21,19 @@ public interface LectureRepository extends JpaRepository<Lecture, UUID> {
 
     long countByUserId(UUID userId);
 
+    /**
+     * Finds an earlier import of the same link.
+     *
+     * <p>Matches on the canonical URL, which is why {@link
+     * com.cleveft.transcriptionservice.service.YouTubeUrl} rebuilds it rather
+     * than storing whatever was pasted — a mobile link and a link with a
+     * timestamp on it are the same video and must collide here.
+     */
+    Optional<Lecture> findFirstByUserIdAndSourceUrl(UUID userId, String sourceUrl);
+
+    /** Supporting material gathered around one lecture. */
+    List<Lecture> findByUserIdAndRelatedLectureIdOrderByCreatedAtDesc(UUID userId, UUID relatedLectureId);
+
     long countByUserIdAndStatus(UUID userId, Lecture.LectureStatus status);
 
     /**
