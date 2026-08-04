@@ -4,6 +4,7 @@ import com.cleveft.transcriptionservice.ai.AiServiceException;
 import com.cleveft.transcriptionservice.ai.EmbeddingProvider;
 import com.cleveft.transcriptionservice.ai.SttProvider;
 import com.cleveft.transcriptionservice.ai.VideoProvider;
+import com.cleveft.transcriptionservice.client.NotificationClient;
 import com.cleveft.transcriptionservice.model.Lecture;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -11,6 +12,7 @@ import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -39,6 +41,7 @@ public class LectureProcessor {
     private final NoteStructuringService noteStructuringService;
     private final DocumentTextExtractor documentTextExtractor;
     private final VideoProvider videoProvider;
+    private final NotificationClient notifications;
 
     public LectureProcessor(LectureJobStore store,
                             com.cleveft.transcriptionservice.repository.ChunkVectorWriter vectorWriter,
@@ -47,8 +50,10 @@ public class LectureProcessor {
                             TranscriptChunker chunker,
                             NoteStructuringService noteStructuringService,
                             DocumentTextExtractor documentTextExtractor,
-                            VideoProvider videoProvider) {
+                            VideoProvider videoProvider,
+                            NotificationClient notifications) {
         this.store = store;
+        this.notifications = notifications;
         this.vectorWriter = vectorWriter;
         this.sttProvider = sttProvider;
         this.embeddingProvider = embeddingProvider;
@@ -77,10 +82,10 @@ public class LectureProcessor {
 
         } catch (AiServiceException e) {
             log.error("Transcription failed for lecture {}: {}", lectureId, e.getMessage());
-            store.markFailed(lectureId, e.getMessage());
+            fail(lectureId, e.getMessage());
         } catch (Exception e) {
             log.error("Unexpected failure processing lecture {}", lectureId, e);
-            store.markFailed(lectureId, "Processing failed unexpectedly. Please try again.");
+            fail(lectureId, "Processing failed unexpectedly. Please try again.");
         }
     }
 
@@ -114,13 +119,13 @@ public class LectureProcessor {
             // These messages are written for the student — a scanned PDF or a
             // password-protected one is a thing they can act on, not an error.
             log.info("Document rejected for lecture {}: {}", lectureId, e.getMessage());
-            store.markFailed(lectureId, e.getMessage());
+            fail(lectureId, e.getMessage());
         } catch (AiServiceException e) {
             log.error("Indexing failed for document lecture {}: {}", lectureId, e.getMessage());
-            store.markFailed(lectureId, e.getMessage());
+            fail(lectureId, e.getMessage());
         } catch (Exception e) {
             log.error("Unexpected failure processing document lecture {}", lectureId, e);
-            store.markFailed(lectureId, "Processing failed unexpectedly. Please try again.");
+            fail(lectureId, "Processing failed unexpectedly. Please try again.");
         }
     }
 
@@ -151,10 +156,10 @@ public class LectureProcessor {
 
         } catch (AiServiceException e) {
             log.error("Video import failed for lecture {}: {}", lectureId, e.getMessage());
-            store.markFailed(lectureId, e.getMessage());
+            fail(lectureId, e.getMessage());
         } catch (Exception e) {
             log.error("Unexpected failure processing video lecture {}", lectureId, e);
-            store.markFailed(lectureId, "Processing failed unexpectedly. Please try again.");
+            fail(lectureId, "Processing failed unexpectedly. Please try again.");
         }
     }
 
@@ -171,10 +176,10 @@ public class LectureProcessor {
             index(lectureId, transcript);
         } catch (AiServiceException e) {
             log.error("Re-indexing failed for lecture {}: {}", lectureId, e.getMessage());
-            store.markFailed(lectureId, e.getMessage());
+            fail(lectureId, e.getMessage());
         } catch (Exception e) {
             log.error("Unexpected failure re-indexing lecture {}", lectureId, e);
-            store.markFailed(lectureId, "Re-indexing failed unexpectedly.");
+            fail(lectureId, "Re-indexing failed unexpectedly.");
         }
     }
 
@@ -187,7 +192,7 @@ public class LectureProcessor {
         List<TranscriptChunker.Chunk> pieces = chunker.chunk(transcript, lecture.getDurationSeconds());
 
         if (pieces.isEmpty()) {
-            store.markFailed(lectureId, "The transcript was empty, so there was nothing to index.");
+            fail(lectureId, "The transcript was empty, so there was nothing to index.");
             return;
         }
 
@@ -203,6 +208,68 @@ public class LectureProcessor {
 
         store.applyTopicTags(lectureId, spreadTopicsAcrossChunks(notes.topics(), pieces.size()));
         store.complete(lectureId, notes);
+
+        // After complete() returns, so the write has committed. Announcing it
+        // from inside that transaction would risk telling a student their
+        // lecture is ready and then failing the commit that made it so.
+        announceReady(lectureId, lecture);
+    }
+
+    /**
+     * Tells the student their lecture is done.
+     *
+     * <p>This is the notification the whole feature exists for. Processing
+     * finishes long after they have left the hall and put the phone away, and
+     * without it they have to keep opening Cleveft to check — which is exactly
+     * the behaviour the app is supposed to remove.
+     */
+    private void announceReady(UUID lectureId, Lecture lecture) {
+        String title = lecture.getTitle() == null || lecture.getTitle().isBlank()
+                ? "Your lecture"
+                : lecture.getTitle();
+
+        notifications.notify(
+                lecture.getUserId(),
+                "LECTURE_READY",
+                "Your notes are ready",
+                title + " is transcribed and ready to question.",
+                Map.of("screen", "transcript", "lectureId", lectureId.toString()));
+    }
+
+    /**
+     * Marks the job failed and tells the student.
+     *
+     * <p>Every failure path goes through here rather than calling the store
+     * directly, because a silent failure is the worst outcome this pipeline has.
+     * A student who recorded fifty minutes and hears nothing assumes it is still
+     * working, and only finds out the evening before the exam.
+     *
+     * <p>Carried on the same preference as success. Someone who wants to know
+     * when a lecture is ready wants to know when it is not, and splitting that
+     * into two switches would offer a combination nobody would ever choose.
+     */
+    private void fail(UUID lectureId, String reason) {
+        store.markFailed(lectureId, reason);
+
+        try {
+            Lecture lecture = store.require(lectureId);
+            String title = lecture.getTitle() == null || lecture.getTitle().isBlank()
+                    ? "Your lecture"
+                    : lecture.getTitle();
+
+            notifications.notify(
+                    lecture.getUserId(),
+                    "LECTURE_READY",
+                    "That lecture did not finish",
+                    title + " — " + reason,
+                    // Straight to the lecture, where the retry button is. A
+                    // notification about a problem should land on the fix.
+                    Map.of("screen", "transcript", "lectureId", lectureId.toString()));
+
+        } catch (Exception e) {
+            // The failure is already recorded, which is the part that matters.
+            log.warn("Could not notify about failed lecture {}: {}", lectureId, e.getMessage());
+        }
     }
 
     /**
