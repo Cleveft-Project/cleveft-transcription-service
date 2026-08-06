@@ -30,20 +30,27 @@ background worker and the client polls `/{lectureId}/status`.
 flowchart TD
     A["🎤 Audio upload"] --> STT["🗣️ Speech to text"]
     P["📄 PDF upload"] --> EX["📑 PDFBox extraction"]
+    Y["▶️ YouTube link"] --> YT["📥 Transcript fetch"]
     STT --> N["📝 Note structuring"]
     EX --> N
+    YT --> N
     N --> CH["✂️ Chunking"]
     CH --> EM["🔢 Embedding"]
     EM --> V[("🗄️ transcription.chunks")]
     V --> SR["🔎 /search<br/>read by query + exam prep"]
+    N --> NT["🔔 notify: lecture ready"]
 ```
 
 Each stage is recorded, so a lecture that fails part-way can be resumed with
-`/{lectureId}/retry` rather than re-uploaded.
+`/{lectureId}/retry` rather than re-uploaded. Whichever way it ends — ready or
+failed — the student gets a push notification, because processing outlives the
+screen that started it.
 
-The second entry point matters: a PDF posted to `/documents` skips
-speech-to-text entirely and joins the same pipeline at note structuring. Slide
-decks and handouts therefore become queryable exactly like a recording.
+**Three entry points, one pipeline.** Only the first stage differs. A PDF posted
+to `/documents` skips speech-to-text and joins at note structuring; a YouTube
+link posted to `/videos` fetches its transcript and joins at the same place.
+Slide decks, handouts and the video a student went looking for after a class did
+not land all become queryable exactly like a recording.
 
 > [!IMPORTANT]
 > `transcription.chunks` is the only vector table in the system. The query and
@@ -65,8 +72,23 @@ decks and handouts therefore become queryable exactly like a recording.
 | :--- | :--- | :--- |
 | `POST` | `/` | Upload lecture audio (multipart); returns a lecture ID |
 | `POST` | `/documents` | Upload a PDF (multipart); same pipeline, no audio |
+| `POST` | `/videos` | Import a YouTube link (**JSON** — there is no file) |
 | `GET` | `/{lectureId}/status` | Pipeline progress, polled after upload |
 | `POST` | `/{lectureId}/retry` | Re-run a failed pipeline |
+
+</details>
+
+<details open>
+<summary><b>🔒 Internal</b></summary>
+
+<br/>
+
+> Base path `/internal` · service-to-service only, never routed through the gateway
+
+| Method | Path | Description |
+| :--- | :--- | :--- |
+| `GET` | `/activity/lectures` | Per-user counts since a date, for the circle leaderboard |
+| `DELETE` | `/users/{userId}` | Erase a student's lectures, audio and chunks on account deletion |
 
 </details>
 
@@ -112,7 +134,7 @@ decks and handouts therefore become queryable exactly like a recording.
 | `GEMINI_STT_MODEL` | `gemini-3.5-flash` | Speech to text; compose overrides to `flash-lite` |
 | `GEMINI_NOTES_MODEL` | `gemini-3.5-flash` | Transcript → structured notes |
 | `GEMINI_EMBEDDING_MODEL` | `gemini-embedding-001` | Chunk embeddings |
-| `AUTH_SERVICE_URL` | `http://localhost:8084` | Reads the student's plan before an upload |
+| `AUTH_SERVICE_URL` | `http://localhost:8084` | Reads the student's plan before an upload, and posts notifications |
 | `MAX_UPLOAD_SIZE` | `200MB` | A one-hour lecture lands well under this |
 | `RETAIN_AUDIO` | `true` | Keep the source audio after processing |
 | `AUDIO_STORAGE_PATH` | `./data/audio` | Where it is kept |
