@@ -188,6 +188,19 @@ cd ../cleveft-transcription-service && mvn spring-boot:run
 
 ---
 
+## 📄 Licence
+
+Copyright © 2026 The Cleveft Project
+
+Licensed under the **GNU Affero General Public License v3.0**. You are free to
+use, study, modify and redistribute this software. If you run a modified version
+as a network service, you must offer its source to the people using it — see
+section 13 of [`LICENSE`](LICENSE) for the exact obligation.
+
+Cleveft is licensed this way deliberately: it stays open to anyone who wants to
+learn from it or build on it, and closed to anyone who wants to take it
+proprietary.
+
 <div align="center">
 <sub>Part of the <a href="https://github.com/Cleveft-Project">Cleveft</a> platform</sub>
 </div>
