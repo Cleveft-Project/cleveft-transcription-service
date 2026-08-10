@@ -11,6 +11,8 @@ import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 
 import java.net.URI;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -43,6 +45,17 @@ public class GeminiClient {
      * than no transcript at all.
      */
     private static final double RECITATION_RETRY_TEMPERATURE = 0.75;
+
+    /** Attempts after the first, for refusals that pass on their own. */
+    private static final int MAX_TRANSIENT_RETRIES = 3;
+    /** Used only when Google does not say how long to wait. */
+    private static final long BASE_TRANSIENT_WAIT_MS = 2_000;
+    /** However long it asks for, a worker does not vanish for longer than this. */
+    private static final long MAX_TRANSIENT_WAIT_MS = 65_000;
+
+    /** `"retryDelay": "48.05s"` inside the RetryInfo detail of an error body. */
+    private static final Pattern RETRY_DELAY =
+            Pattern.compile("\"retryDelay\"\\s*:\\s*\"([0-9.]+)s\"");
 
     /** Default advice, written for the case that trips this most often. */
     private static final String RECORDING_BLOCKED_MESSAGE =
@@ -332,26 +345,84 @@ public class GeminiClient {
 
     // ------------------------------------------------------------------
 
+    /**
+     * Every call to Google goes through here, so this is where waiting lives.
+     *
+     * <p>Two of its refusals are not failures at all. A 503 means the model is
+     * momentarily oversubscribed, and a 429 means a per-minute allowance is
+     * spent — both pass on their own, and both arrive with the answer to "how
+     * long", which Google puts in a RetryInfo detail as `retryDelay`. Reading
+     * it and waiting is strictly better than guessing, and far better than what
+     * happened before, which was to hand a student an exclamation mark and a
+     * button that did exactly what this loop does, only manually.
+     *
+     * <p>Nothing else is retried. A 400 is a malformed request and will be
+     * malformed again; a 403 is a bad key. Repeating either wastes the
+     * allowance that caused the problem in the first place.
+     */
     private JsonNode post(String path, Object body) {
-        try {
-            JsonNode response = restClient.post()
-                    .uri(path)
-                    .header(API_KEY_HEADER, properties.apiKey())
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .body(body)
-                    .retrieve()
-                    .body(JsonNode.class);
+        for (int attempt = 0; ; attempt++) {
+            try {
+                JsonNode response = restClient.post()
+                        .uri(path)
+                        .header(API_KEY_HEADER, properties.apiKey())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body(body)
+                        .retrieve()
+                        .body(JsonNode.class);
 
-            if (response == null) {
-                throw new AiServiceException("Empty response from the AI provider.");
+                if (response == null) {
+                    throw new AiServiceException("Empty response from the AI provider.");
+                }
+                return response;
+            } catch (HttpStatusCodeException e) {
+                int status = e.getStatusCode().value();
+                boolean passesOnItsOwn = status == 429 || status == 503;
+
+                if (passesOnItsOwn && attempt < MAX_TRANSIENT_RETRIES) {
+                    long waitMs = retryDelayMillis(e.getResponseBodyAsString(), attempt);
+                    log.warn("Google GenAI returned {} for {}; waiting {}ms then retrying ({}/{})",
+                            status, path, waitMs, attempt + 1, MAX_TRANSIENT_RETRIES);
+                    sleepQuietly(waitMs);
+                    continue;
+                }
+
+                log.error("Google GenAI call to {} failed: {}", path, e.getResponseBodyAsString());
+                throw new AiServiceException(describeProviderError(e), e);
+            } catch (RestClientException e) {
+                log.error("Google GenAI call to {} failed", path, e);
+                throw new AiServiceException("Could not reach the AI provider. Please try again.", e);
             }
-            return response;
-        } catch (HttpStatusCodeException e) {
-            log.error("Google GenAI call to {} failed: {}", path, e.getResponseBodyAsString());
-            throw new AiServiceException(describeProviderError(e), e);
-        } catch (RestClientException e) {
-            log.error("Google GenAI call to {} failed", path, e);
-            throw new AiServiceException("Could not reach the AI provider. Please try again.", e);
+        }
+    }
+
+    /**
+     * How long Google asked us to wait, or a doubling fallback if it did not say.
+     *
+     * <p>Capped, because the delay on an exhausted daily allowance can be hours
+     * and a worker thread must not disappear for one.
+     */
+    private static long retryDelayMillis(String responseBody, int attempt) {
+        Matcher matcher = RETRY_DELAY.matcher(responseBody == null ? "" : responseBody);
+        if (matcher.find()) {
+            try {
+                long asked = (long) (Double.parseDouble(matcher.group(1)) * 1000);
+                // A second's grace: coming back on the exact tick tends to be
+                // refused again by whichever counter is being reset.
+                return Math.min(MAX_TRANSIENT_WAIT_MS, asked + 1000);
+            } catch (NumberFormatException ignored) {
+                // Fall through to the backoff below.
+            }
+        }
+        return Math.min(MAX_TRANSIENT_WAIT_MS, BASE_TRANSIENT_WAIT_MS * (1L << attempt));
+    }
+
+    private static void sleepQuietly(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AiServiceException("Interrupted while waiting to retry the AI provider.", e);
         }
     }
 
