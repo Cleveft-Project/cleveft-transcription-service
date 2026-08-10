@@ -49,8 +49,25 @@ public class NoteStructuringService {
             - "sections" must follow the lecture's own order. Between 3 and 10 sections.
             - "summary" is 1-2 sentences. "points" are 2-5 short factual bullets.
             - "keyConcepts" captures formulas, theorems, definitions and worked examples
-              the lecturer actually stated. Write formulas in readable plain text. Omit
-              the field entirely rather than inventing entries that were not said.
+              the lecturer actually stated. Omit the field entirely rather than
+              inventing entries that were not said.
+            - Notation carries the meaning in a technical subject, so write mathematics
+              with real symbols rather than spelled-out words or ASCII stand-ins:
+              Ω µ ° ± × ÷ ≈ ≠ ≤ ≥ → ∝ Δ θ π λ ω ∞ √ ∑ ∫ ∂
+              Use the true minus sign − rather than a hyphen, and real superscripts
+              ⁰¹²³⁴⁵⁶⁷⁸⁹ⁿ and subscripts ₀₁₂₃₄₅₆₇₈₉ wherever the character exists.
+              Write "510 kΩ", "−8 V", "3 × 10⁸ m/s", "45 °C", "10 µF" — never
+              "510 k-ohm", "-8 V", "3 x 10^8" or "45 degrees C". Where a subscript
+              letter has no character, keep the underscore form: V_GS, R_D, I_C.
+            - Put each formula on a line of its own within "detail", never inside a
+              sentence. Separate lines with a newline character.
+            - A worked example must read as a procedure rather than a paragraph.
+              Lay its "detail" out as labelled lines, one step per line, each step
+              showing the substitution it performs:
+              Given: ...
+              Find: ...
+              ...working, a line at a time...
+              Answer: ...
             - "topics" is a flat list of 3-12 short subject tags for this lecture,
               lowercase, each 1-4 words.
             - A topic must be examinable subject matter the lecturer actually taught:
