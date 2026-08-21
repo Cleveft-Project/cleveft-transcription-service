@@ -65,6 +65,11 @@ public class NoteStructuringService {
               \\pm, \\leq, \\infty rather than "ohm", "u", "pi", "approx" or "x".
               Units and quantities inside maths take a thin space: $510\\,\\text{k}\\Omega$,
               $-8\\,\\text{V}$, $3\\times10^{8}\\,\\text{m/s}$.
+            - Every backslash in a LaTeX command must be doubled, because the value
+              is being written inside JSON and a lone backslash is an escape
+              character there. Write "\\\\frac", "\\\\right", "\\\\theta", "\\\\int" —
+              never "\\frac" or "\\right", which JSON reads as a form feed and a
+              carriage return and which arrive as "rac" and "ight".
             - Ordinary prose stays ordinary prose. Do not wrap whole sentences in
               LaTeX, and do not use it for anything that is not mathematics.
             - Put each standalone formula on a line of its own within "detail", never
@@ -127,9 +132,63 @@ public class NoteStructuringService {
         }
     }
 
+    /**
+     * Rescues LaTeX commands the JSON escape rules would otherwise swallow.
+     *
+     * <p>A backslash means something to JSON and something else to TeX, and the
+     * two collide badly. Asked for {@code \right)}, the model writes exactly
+     * that — one backslash — and the parser reads {@code \r} as a carriage
+     * return, leaving {@code ight)} behind and a formula that will not compile.
+     * The same trap waits in {@code \theta}, {@code \times}, {@code \beta},
+     * {@code \frac} and {@code \forall}: every one begins with a letter that
+     * JSON has already claimed.
+     *
+     * <p>Instructing the model to double its backslashes helps and does not
+     * settle it — in the response that prompted this, {@code \\frac} and
+     * {@code \\left} were escaped correctly and a single {@code \right} four
+     * characters away was not. So the text is repaired before it is parsed.
+     *
+     * <p>Only {@code r}, {@code t}, {@code b} and {@code f} are touched, and
+     * only when a letter follows. A note has no legitimate use for a carriage
+     * return, tab, backspace or form feed, whereas it has constant use for
+     * {@code \right} and {@code \frac}. {@code \n} is deliberately left alone:
+     * the prompt asks for real newlines between formula lines, and those are
+     * wanted.
+     */
+    private static String healLatexEscapes(String json) {
+        StringBuilder out = new StringBuilder(json.length() + 32);
+
+        for (int i = 0; i < json.length(); i++) {
+            char current = json.charAt(i);
+
+            if (current == '\\' && i + 2 < json.length()) {
+                char escape = json.charAt(i + 1);
+                char following = json.charAt(i + 2);
+
+                if ("rtbf".indexOf(escape) >= 0 && Character.isLetter(following)) {
+                    out.append('\\').append('\\').append(escape);
+                    i++;
+                    continue;
+                }
+
+                // An already-doubled backslash is correct; step over both so the
+                // second is never mistaken for the start of a new escape.
+                if (escape == '\\') {
+                    out.append('\\').append('\\');
+                    i++;
+                    continue;
+                }
+            }
+
+            out.append(current);
+        }
+
+        return out.toString();
+    }
+
     private StructuredNotes parse(String raw) {
         try {
-            JsonNode root = objectMapper.readTree(stripFences(raw));
+            JsonNode root = objectMapper.readTree(healLatexEscapes(stripFences(raw)));
 
             List<Map<String, Object>> sections = readObjectArray(root.path("sections"));
             List<Map<String, Object>> concepts = readObjectArray(root.path("keyConcepts"));
