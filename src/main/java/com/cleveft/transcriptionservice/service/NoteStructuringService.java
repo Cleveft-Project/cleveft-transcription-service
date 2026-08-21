@@ -51,16 +51,24 @@ public class NoteStructuringService {
             - "keyConcepts" captures formulas, theorems, definitions and worked examples
               the lecturer actually stated. Omit the field entirely rather than
               inventing entries that were not said.
-            - Notation carries the meaning in a technical subject, so write mathematics
-              with real symbols rather than spelled-out words or ASCII stand-ins:
-              Ω µ ° ± × ÷ ≈ ≠ ≤ ≥ → ∝ Δ θ π λ ω ∞ √ ∑ ∫ ∂
-              Use the true minus sign − rather than a hyphen, and real superscripts
-              ⁰¹²³⁴⁵⁶⁷⁸⁹ⁿ and subscripts ₀₁₂₃₄₅₆₇₈₉ wherever the character exists.
-              Write "510 kΩ", "−8 V", "3 × 10⁸ m/s", "45 °C", "10 µF" — never
-              "510 k-ohm", "-8 V", "3 x 10^8" or "45 degrees C". Where a subscript
-              letter has no character, keep the underscore form: V_GS, R_D, I_C.
-            - Put each formula on a line of its own within "detail", never inside a
-              sentence. Separate lines with a newline character.
+            - Mathematics is written as LaTeX, because a formula's layout carries as
+              much meaning as its symbols: a fraction is a numerator above a
+              denominator, and an integral's limits sit above and below the sign.
+              Neither survives being flattened into a line of text.
+              Wrap a formula that stands alone in $$ ... $$, and one that belongs
+              inside a sentence in $ ... $. So:
+                $$I^{(m)}(h) = \\frac{4^m I^{(m-1)}(h/2) - I^{(m-1)}(h)}{4^m - 1}$$
+                $$V_{GS} = V_G - V_S$$
+                $$\\int_a^b f(x)\\,dx \\approx \\frac{h}{2}\\left[f(x_0) + 2\\sum_{i=1}^{n-1} f(x_i) + f(x_n)\\right]$$
+              Never write a fraction with a slash when it is a stacked fraction, and
+              never spell a symbol out: use \\Omega, \\mu, \\pi, \\Delta, \\approx, \\times,
+              \\pm, \\leq, \\infty rather than "ohm", "u", "pi", "approx" or "x".
+              Units and quantities inside maths take a thin space: $510\\,\\text{k}\\Omega$,
+              $-8\\,\\text{V}$, $3\\times10^{8}\\,\\text{m/s}$.
+            - Ordinary prose stays ordinary prose. Do not wrap whole sentences in
+              LaTeX, and do not use it for anything that is not mathematics.
+            - Put each standalone formula on a line of its own within "detail", never
+              inside a sentence. Separate lines with a newline character.
             - A worked example must read as a procedure rather than a paragraph.
               Lay its "detail" out as labelled lines, one step per line, each step
               showing the substitution it performs:
