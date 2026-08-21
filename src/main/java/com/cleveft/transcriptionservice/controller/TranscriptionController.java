@@ -6,6 +6,7 @@ import com.cleveft.transcriptionservice.dto.LectureResponseDTO;
 import com.cleveft.transcriptionservice.dto.LectureStatusDTO;
 import com.cleveft.transcriptionservice.dto.LectureSummaryDTO;
 import com.cleveft.transcriptionservice.dto.SearchRequestDTO;
+import com.cleveft.transcriptionservice.dto.TranscribedSpeechDTO;
 import com.cleveft.transcriptionservice.dto.UpdateLectureRequestDTO;
 import com.cleveft.transcriptionservice.dto.UsageDTO;
 import com.cleveft.transcriptionservice.exception.ApiException;
@@ -67,6 +68,31 @@ public class TranscriptionController {
                 requireUserId(userId), file, title, courseCode, language, durationSeconds);
 
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(lecture);
+    }
+
+    /**
+     * Transcribes a few seconds of speech and returns the words, nothing more.
+     *
+     * <p>For a spoken question in the chat, which is a different animal from a
+     * lecture in every way that matters. It is seconds rather than an hour, the
+     * student is waiting on the answer so it cannot be queued, and the words are
+     * a question to be sent onward rather than material to be kept — so no
+     * lecture row is created, nothing is chunked, nothing is embedded and
+     * nothing is stored.
+     *
+     * <p>It is also outside the recording quota. That limit exists to cap how
+     * many <em>lectures</em> a free account may keep; charging a five-second
+     * question against it would mean asking Cleveft something used up the same
+     * allowance as recording a class.
+     */
+    @PostMapping(path = "/speech", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<TranscribedSpeechDTO> transcribeSpeech(
+            @RequestHeader(value = "X-User-Id", required = false) String userId,
+            @RequestPart("file") MultipartFile file,
+            @RequestParam(value = "language", required = false) String language) {
+
+        requireUserId(userId);
+        return ResponseEntity.ok(transcriptionService.transcribeSpeech(file, language));
     }
 
     /**

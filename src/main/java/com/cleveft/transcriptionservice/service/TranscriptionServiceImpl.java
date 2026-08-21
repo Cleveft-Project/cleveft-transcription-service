@@ -2,6 +2,7 @@ package com.cleveft.transcriptionservice.service;
 
 import com.cleveft.transcriptionservice.ai.AudioMimeResolver;
 import com.cleveft.transcriptionservice.ai.EmbeddingProvider;
+import com.cleveft.transcriptionservice.ai.SttProvider;
 import com.cleveft.transcriptionservice.client.AuthPlanClient;
 import com.cleveft.transcriptionservice.dto.ChunkMatchDTO;
 import com.cleveft.transcriptionservice.dto.ChunkResponseDTO;
@@ -9,6 +10,7 @@ import com.cleveft.transcriptionservice.dto.LectureResponseDTO;
 import com.cleveft.transcriptionservice.dto.LectureStatusDTO;
 import com.cleveft.transcriptionservice.dto.LectureSummaryDTO;
 import com.cleveft.transcriptionservice.dto.SearchRequestDTO;
+import com.cleveft.transcriptionservice.dto.TranscribedSpeechDTO;
 import com.cleveft.transcriptionservice.dto.UpdateLectureRequestDTO;
 import com.cleveft.transcriptionservice.dto.UsageDTO;
 import com.cleveft.transcriptionservice.exception.ApiException;
@@ -42,6 +44,7 @@ public class TranscriptionServiceImpl implements TranscriptionService {
     private final AudioMimeResolver mimeResolver;
     private final EmbeddingProvider embeddingProvider;
     private final AuthPlanClient planClient;
+    private final SttProvider sttProvider;
 
     public TranscriptionServiceImpl(LectureRepository lectureRepository,
                                     LectureChunkRepository chunkRepository,
@@ -49,7 +52,8 @@ public class TranscriptionServiceImpl implements TranscriptionService {
                                     AudioStorage audioStorage,
                                     AudioMimeResolver mimeResolver,
                                     EmbeddingProvider embeddingProvider,
-                                    AuthPlanClient planClient) {
+                                    AuthPlanClient planClient,
+                                    SttProvider sttProvider) {
         this.lectureRepository = lectureRepository;
         this.chunkRepository = chunkRepository;
         this.processor = processor;
@@ -57,6 +61,29 @@ public class TranscriptionServiceImpl implements TranscriptionService {
         this.mimeResolver = mimeResolver;
         this.embeddingProvider = embeddingProvider;
         this.planClient = planClient;
+        this.sttProvider = sttProvider;
+    }
+
+    @Override
+    public TranscribedSpeechDTO transcribeSpeech(MultipartFile audio, String language) {
+        if (audio == null || audio.isEmpty()) {
+            throw ApiException.badRequest("No audio was received.");
+        }
+        if (!mimeResolver.isSupported(audio.getOriginalFilename(), audio.getContentType())) {
+            throw ApiException.badRequest(
+                    "Unsupported audio format. Supported: " + mimeResolver.supportedExtensions() + ".");
+        }
+
+        String mimeType = mimeResolver.resolve(audio.getOriginalFilename(), audio.getContentType());
+
+        try {
+            String text = sttProvider.transcribe(audio.getBytes(), mimeType, language);
+            // Silence is not a failure. A student who pressed and thought better
+            // of it should get an empty box back, not an error to dismiss.
+            return new TranscribedSpeechDTO(text == null ? "" : text.trim());
+        } catch (IOException e) {
+            throw ApiException.badRequest("Could not read the recording.");
+        }
     }
 
     @Override

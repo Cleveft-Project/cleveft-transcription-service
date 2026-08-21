@@ -5,6 +5,7 @@ import com.cleveft.transcriptionservice.dto.LectureResponseDTO;
 import com.cleveft.transcriptionservice.dto.LectureStatusDTO;
 import com.cleveft.transcriptionservice.dto.LectureSummaryDTO;
 import com.cleveft.transcriptionservice.dto.SearchRequestDTO;
+import com.cleveft.transcriptionservice.dto.TranscribedSpeechDTO;
 import com.cleveft.transcriptionservice.dto.UpdateLectureRequestDTO;
 import com.cleveft.transcriptionservice.dto.UsageDTO;
 import org.springframework.web.multipart.MultipartFile;
@@ -26,6 +27,19 @@ public interface TranscriptionService {
                                        String courseCode,
                                        String language,
                                        Integer durationSeconds);
+
+    /**
+     * Turns a few seconds of speech into words and returns them.
+     *
+     * <p>Deliberately not part of the pipeline the other three doors lead into.
+     * A spoken question is transcribed and handed straight back — no lecture,
+     * no chunking, no embedding, nothing persisted and nothing to poll. The
+     * student is waiting on the answer, so the work happens on the request.
+     *
+     * @param audio    a short recording, seconds rather than minutes
+     * @param language BCP-47 hint such as {@code en}; may be null
+     */
+    TranscribedSpeechDTO transcribeSpeech(MultipartFile audio, String language);
 
     /**
      * Accepts a PDF and queues it for import.
